@@ -260,7 +260,11 @@ async function runTool(name, args) {
       if (task.error) lines.push(`错误: ${String(task.error.code)} ${String(task.error.message)}`)
       if (task.delivery) {
         const d = task.delivery
-        lines.push(`交付: 分支 ${String(d.branch ?? '?')}  提交 ${String(d.headSha ?? '?').slice(0, 12)}`)
+        if (typeof d.branch === 'string' && d.branch !== '') {
+          lines.push(`交付: 分支 ${d.branch}  提交 ${String(d.headSha ?? '').slice(0, 12)}`)
+        } else {
+          lines.push('交付: 工作区不是 git 仓库（或不可读），分支/提交不可用')
+        }
       }
       if (task.result?.text) lines.push('', '--- 结果 ---', String(task.result.text))
       return textResult(lines.join('\n'))
