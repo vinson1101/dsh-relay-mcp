@@ -14,7 +14,7 @@ import { createInterface } from 'node:readline'
 
 const RELAY_URL = (process.env.DSH_RELAY_URL ?? 'http://127.0.0.1:7391').replace(/\/+$/, '')
 const RELAY_TOKEN = process.env.DSH_RELAY_TOKEN ?? ''
-const SERVER_INFO = { name: 'dsh-relay', version: '0.2.0' }
+const SERVER_INFO = { name: 'dsh-relay', version: '0.3.0' }
 const SUPPORTED_PROTOCOLS = ['2024-11-05', '2025-03-26', '2025-06-18']
 const DEFAULT_PROTOCOL = '2025-06-18'
 
@@ -105,6 +105,26 @@ const TOOLS = [
         timeoutMs: { type: 'integer', minimum: 1000, description: '最长等待毫秒数，默认 120000' },
       },
       required: ['taskId'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'dsh_tasks',
+    description:
+      '列出任务（可按 sessionId / workspace / status 过滤），用于找回某个会话或工作空间的 taskId，' +
+      '再配合 dsh_result 查细节。只读，不触发模型。',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        sessionId: { type: 'string', description: '可选。只看这个会话的任务' },
+        workspace: { type: 'string', description: '可选。只看这个项目目录的任务' },
+        status: {
+          type: 'string',
+          enum: ['queued', 'running', 'completed', 'failed', 'awaiting-user', 'unknown'],
+          description: '可选。只看某个状态',
+        },
+        limit: { type: 'integer', minimum: 1, description: '返回条数上限，默认 20' },
+      },
       additionalProperties: false,
     },
   },
@@ -211,13 +231,16 @@ async function runTool(name, args) {
 
       if (body === '') {
         return textResult(
-          `会话 ${String(result.sessionId)} 这一轮结束了，但没有产生正文（reason=${String(result.reason)}）。` +
-            '可能它只在调用工具、或者被中断了。',
+          `任务 ${String(result.taskId)} 已结束（status=${String(result.status)}），但没有正文。\n` +
+            `会话 ${String(result.sessionId)}，归属方式 ${String(result.attribution ?? '未知')}。\n` +
+            '这不等于任务成功产出结果；可用 dsh_result 传该 taskId 查看细节。',
         )
       }
       const where = result.selection?.rule === 'created' ? '新建会话' : '复用会话'
       return textResult(
-        `${body}\n\n[${where} ${String(result.sessionId)}, reason=${String(result.reason)}${result.truncated ? ', 输出已截断' : ''}]`,
+        `${body}\n\n[taskId=${String(result.taskId)} ${where} ${String(result.sessionId)}, ` +
+          `status=${String(result.status)}, reason=${String(result.reason)}, attribution=${String(result.attribution ?? '未知')}` +
+          `${result.truncated ? ', 输出已截断' : ''}]`,
       )
     }
 
@@ -256,6 +279,27 @@ async function runTool(name, args) {
       }
       const head = `任务 ${String(task.taskId)} 状态 ${String(task.status)}`
       return textResult(task.result?.text ? `${head}\n\n${String(task.result.text)}` : head)
+    }
+
+    case 'dsh_tasks': {
+      const params = []
+      if (typeof args.sessionId === 'string' && args.sessionId !== '') params.push(`sessionId=${encodeURIComponent(args.sessionId)}`)
+      if (typeof args.workspace === 'string' && args.workspace !== '') params.push(`workspace=${encodeURIComponent(args.workspace)}`)
+      if (typeof args.status === 'string' && args.status !== '') params.push(`status=${encodeURIComponent(args.status)}`)
+      params.push(`limit=${String(Number.isInteger(args.limit) ? args.limit : 20)}`)
+      const result = await callRelay(`/tasks?${params.join('&')}`, { method: 'GET' })
+      const rows = Array.isArray(result.tasks) ? result.tasks : []
+      if (rows.length === 0) return textResult('没有匹配的任务。')
+      const lines = rows.map((task) => {
+        const head = `- ${String(task.taskId)}  [${String(task.status)}]  ${String(task.sessionId)}  ${String(task.workspace ?? '未指定')}  ${String(task.createdAt)}`
+        if (task.status === 'completed' && task.result?.text) {
+          const snippet = String(task.result.text).replace(/\s+/g, ' ').slice(0, 80)
+          return `${head}\n    结果: ${snippet}${String(task.result.text).length > 80 ? '…' : ''}`
+        }
+        if (task.error) return `${head}\n    错误: ${String(task.error.code)}`
+        return head
+      })
+      return textResult(`共 ${String(rows.length)} 个任务：\n${lines.join('\n')}`)
     }
 
     case 'dsh_sessions': {
