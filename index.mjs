@@ -14,7 +14,7 @@ import { createInterface } from 'node:readline'
 
 const RELAY_URL = (process.env.DSH_RELAY_URL ?? 'http://127.0.0.1:7391').replace(/\/+$/, '')
 const RELAY_TOKEN = process.env.DSH_RELAY_TOKEN ?? ''
-const SERVER_INFO = { name: 'dsh-relay', version: '0.1.0' }
+const SERVER_INFO = { name: 'dsh-relay', version: '0.2.0' }
 const SUPPORTED_PROTOCOLS = ['2024-11-05', '2025-03-26', '2025-06-18']
 const DEFAULT_PROTOCOL = '2025-06-18'
 
@@ -78,6 +78,33 @@ const TOOLS = [
         maxMessages: { type: 'integer', minimum: 1, description: '最多回读多少条助手消息，默认 20' },
       },
       required: ['text'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'dsh_result',
+    description:
+      '按 taskId 只读查询任务状态与最终结果。不会发送新消息、不会触发模型。' +
+      '任务状态：queued / running / completed / failed / awaiting-user / timeout。' +
+      'completed 时返回 result.text、delivery（分支/提交）与 attribution（结果如何归属到该任务）。',
+    inputSchema: {
+      type: 'object',
+      properties: { taskId: { type: 'string', description: '派工时返回的 taskId' } },
+      required: ['taskId'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'dsh_wait',
+    description:
+      '等待某个任务的最终状态。超时不会取消任务、也不会重发消息，只如实返回当前状态。',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        taskId: { type: 'string', description: '派工时返回的 taskId' },
+        timeoutMs: { type: 'integer', minimum: 1000, description: '最长等待毫秒数，默认 120000' },
+      },
+      required: ['taskId'],
       additionalProperties: false,
     },
   },
@@ -156,8 +183,8 @@ async function runTool(name, args) {
       const where = result.selection?.rule === 'created' ? '新建会话' : '复用已有会话'
       const rule = result.selection?.rule
       return textResult(
-        `已投递到 ${String(result.sessionId)}（${where}，选择依据 ${String(rule)}${result.selection?.workspace ? `，工作空间 ${String(result.selection.workspace)}` : ''}）。\n` +
-          '注意：这只表示消息已被接受，不代表已经处理完。要拿结果请用 dsh_ask。',
+        `已派工，taskId=${String(result.taskId)}（${where}，会话 ${String(result.sessionId)}，选择依据 ${String(rule)}${result.selection?.workspace ? `，工作空间 ${String(result.selection.workspace)}` : ''}）。\n` +
+          '这只表示消息已被接受。取结果用 dsh_result / dsh_wait 传这个 taskId，不要重新发一遍任务。',
       )
     }
 
@@ -178,8 +205,7 @@ async function runTool(name, args) {
         return textResult(
           `消息已投递到 ${String(result.sessionId)}，但等待超时：会话${running ? '仍在运行' : '状态未知'}。\n` +
             '本次没有重发，不要再发一遍同样的任务。\n' +
-            `之后可以用 sessionId=${String(result.sessionId)} 或同一 workspace 投递一条**新的询问**来取结果。\n` +
-            `requestId=${String(result.requestId)}`,
+            `用 dsh_result 或 dsh_wait 传 taskId=${String(result.taskId)} 取最终结果。`,
         )
       }
 
@@ -193,6 +219,43 @@ async function runTool(name, args) {
       return textResult(
         `${body}\n\n[${where} ${String(result.sessionId)}, reason=${String(result.reason)}${result.truncated ? ', 输出已截断' : ''}]`,
       )
+    }
+
+    case 'dsh_result': {
+      const result = await callRelay(`/tasks/${encodeURIComponent(args.taskId)}`, { method: 'GET' })
+      const task = result.task ?? {}
+      const lines = [
+        `taskId: ${String(task.taskId)}`,
+        `状态: ${String(task.status)}`,
+        `会话: ${String(task.sessionId)}`,
+        `工作区: ${String(task.workspace ?? '未指定')}`,
+        `创建: ${String(task.createdAt)}  更新: ${String(task.updatedAt)}`,
+      ]
+      if (task.finishedAt) lines.push(`结束: ${String(task.finishedAt)}`)
+      if (task.attribution) lines.push(`归属方式: ${String(task.attribution)}`)
+      if (task.notify) lines.push(`通知: ${String(task.notify.state)}${task.notify.attempts ? `（尝试 ${String(task.notify.attempts)} 次）` : ''}`)
+      if (task.error) lines.push(`错误: ${String(task.error.code)} ${String(task.error.message)}`)
+      if (task.delivery) {
+        const d = task.delivery
+        lines.push(`交付: 分支 ${String(d.branch ?? '?')}  提交 ${String(d.headSha ?? '?').slice(0, 12)}`)
+      }
+      if (task.result?.text) lines.push('', '--- 结果 ---', String(task.result.text))
+      return textResult(lines.join('\n'))
+    }
+
+    case 'dsh_wait': {
+      const payload = { taskId: args.taskId }
+      if (Number.isInteger(args.timeoutMs)) payload.timeoutMs = args.timeoutMs
+      const result = await callRelay('/wait', { method: 'POST', body: JSON.stringify(payload) })
+      const task = result.task ?? {}
+      if (result.timedOut === true) {
+        return textResult(
+          `等待超时，任务仍是 ${String(task.status)}。本次没有取消任务、也没有重发消息。\n` +
+            `稍后再调 dsh_wait 或 dsh_result（taskId=${String(task.taskId)}）即可。`,
+        )
+      }
+      const head = `任务 ${String(task.taskId)} 状态 ${String(task.status)}`
+      return textResult(task.result?.text ? `${head}\n\n${String(task.result.text)}` : head)
     }
 
     case 'dsh_sessions': {

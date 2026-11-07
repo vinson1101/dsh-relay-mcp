@@ -1,6 +1,6 @@
 {
   "name": "dsh-relay-mcp",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "MCP stdio server exposing dsh-session-relay as tools: send to a DSH session by id, ask and wait for its reply",
   "type": "module",
   "license": "MIT",
@@ -12,7 +12,13 @@
     "README.md",
     "LICENSE"
   ],
-  "keywords": ["mcp", "dsh", "deepseek-harness", "codex", "session"],
+  "keywords": [
+    "mcp",
+    "dsh",
+    "deepseek-harness",
+    "codex",
+    "session"
+  ],
   "engines": {
     "node": ">=18"
   }
